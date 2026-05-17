@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1775225090205,
+      "tag": "0000_bouncy_drax",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1778862214922,
+      "tag": "0001_chemical_polaris",
+      "breakpoints": true
+    }
+  ]
+}

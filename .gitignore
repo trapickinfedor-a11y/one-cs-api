@@ -1,0 +1,70 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+.next/
+out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+logs_all/
+.manus-logs/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+enformion_data/
+
+# Cache
+.cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets (local only)
+.secure/
+legacy_*.json
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# Node
+.npm
+.eslintcache
+.pnpm-debug.log
+
+# Build artifacts
+.turbo/
+.nx/
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Dist files
+*.min.js
+*.min.css
+
+# Legacy
+legacy_research/
