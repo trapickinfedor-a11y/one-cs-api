@@ -68,6 +68,9 @@ interface TelegramUpdate {
 /** Maps chat_id → job_public_id waiting for SSN input. */
 const pendingSsnJobs = new Map<string, string>();
 
+/** Maps chat_id → job_public_id for polling job completion. */
+const pendingBotJobs = new Map<string, string>();
+
 // ---------------------------------------------------------------------------
 // SSN validation
 // ---------------------------------------------------------------------------
@@ -113,9 +116,19 @@ function buildJobAcceptedMessage(publicId: string): string {
   return (
     `✅ <b>Запрос принят</b>\n\n` +
     `ID: <code>${publicId}</code>\n` +
+    `Режим: browser automation (Evomi)\n` +
     `Статус: в очереди\n\n` +
-    `Результат придёт отдельным сообщением.`
+    `Результат придёт автоматически (до 60 сек)...`
   );
+}
+function getScoreGrade(score: number | null): string {
+  if (score === null) return "⚠️ Неизвестно";
+  if (score >= 800) return "🏆 Exceptional";
+  if (score >= 740) return "✅ Very Good";
+  if (score >= 670) return "👍 Good";
+  if (score >= 580) return "⚠️ Fair";
+  if (score >= 500) return "🔴 Poor";
+  return "🚫 Very Poor";
 }
 
 function buildJobResultMessage(result: {
@@ -126,12 +139,13 @@ function buildJobResultMessage(result: {
   priceUsd: number;
 }): string {
   const score = result.creditScore ?? "—";
+  const grade = getScoreGrade(result.creditScore);
   const quality = result.productScore;
   const emoji = result.creditScore !== null ? "✅" : "⚠️";
 
   return (
     `${emoji} <b>Результат</b>\n\n` +
-    `• Кредитный скор: <code>${score}</code>\n` +
+    `• Кредитный скор: <code>${score}</code>  ${grade}\n` +
     `• Качество данных: ${quality}/20\n` +
     `• Статус: ${result.status}\n` +
     `• Источник: ${result.source}\n` +
@@ -180,6 +194,87 @@ async function tgSendDocument(chatId: string, url: string, caption?: string): Pr
   }
 }
 
+// ---------------------------------------------------------------------------
+// Async job polling (for real browser automation mode)
+// ---------------------------------------------------------------------------
+
+const POLL_INTERVAL_MS = 3_000;
+const MAX_POLLS = 20;
+
+interface JobStatusResponse {
+  publicId: string;
+  status: string;
+  resultJson: {
+    oneCsResult?: {
+      creditScore?: number | null;
+      productScore?: number;
+      status?: string;
+      source?: string;
+      priceUsd?: number;
+    };
+  } | null;
+}
+
+async function fetchJobStatus(publicId: string): Promise<JobStatusResponse | null> {
+  const baseUrl = ENV.forgeApiUrl || `http://localhost:${ENV.port}`;
+  const token = ENV.privateApiKey || ENV.adminPasswordHash;
+  if (!token) return null;
+  try {
+    const res = await fetch(`${baseUrl}/api/v1/jobs/${publicId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { data?: { job?: JobStatusResponse } };
+    return data.data?.job ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function sendJobResultToUser(chatId: string, status: string, resultJson: JobStatusResponse["resultJson"]): Promise<void> {
+  if (status === "succeeded" && resultJson?.oneCsResult) {
+    const oneCs = resultJson.oneCsResult;
+    await tgSendMessage(chatId, buildJobResultMessage({
+      creditScore: oneCs.creditScore ?? null,
+      productScore: oneCs.productScore ?? 0,
+      status: oneCs.status ?? "unknown",
+      source: oneCs.source ?? "unknown",
+      priceUsd: oneCs.priceUsd ?? 0,
+    }));
+  } else if (status === "failed") {
+    await tgSendMessage(chatId,
+      `❌ <b>Задание не выполнено</b>\n\n` +
+      `Статус: ${status}\n` +
+      `Попробуйте ещё раз или обратитесь к администратору.`
+    );
+  } else {
+    await tgSendMessage(chatId,
+      `⚠️ <b>Статус задания</b>: ${status}`
+    );
+  }
+}
+
+async function pollBotJobUntilDone(publicId: string, chatId: string): Promise<void> {
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    const job = await fetchJobStatus(publicId);
+    if (!job) continue;
+    if (job.status === "succeeded" || job.status === "failed") {
+      pendingBotJobs.delete(chatId);
+      await sendJobResultToUser(chatId, job.status, job.resultJson);
+      return;
+    }
+  }
+  // Max polls reached
+  pendingBotJobs.delete(chatId);
+  await tgSendMessage(chatId,
+    `⏰ <b>Время ожидания истекло</b>\n\n` +
+    `Задание ${publicId} ещё обрабатывается. Проверьте статус позже.`
+  );
+}
 // ---------------------------------------------------------------------------
 // Core processing
 // ---------------------------------------------------------------------------
@@ -235,54 +330,81 @@ async function processIncomingMessage(msg: TelegramMessage): Promise<void> {
   const parsed = parseImportedLeadText(text);
 
   if (parsed.length > 0) {
-    // Build job payload from parsed data
-    const firstRecord = toSafeImportedLeadRecord(parsed[0]);
+    // Use raw parsed data with firstName/lastName for browser automation
+    const rawRecord = parsed[0];
+    const safeRecord = toSafeImportedLeadRecord(rawRecord);
+    const nameParts = rawRecord.fullName.trim().split(/\s+/);
+    const firstName = nameParts[0] ?? "";
+    const lastName = nameParts.slice(1).join(" ") || "";
+
+    // Determine mode: real browser if Evomi is configured, otherwise safe-test
+    const safeTestMode = !Boolean(ENV.evomiUsername);
+
     const payload: Record<string, unknown> = {
-      sourceLabel: firstRecord.sourceLabel,
-      city: firstRecord.city,
-      state: firstRecord.state,
-      postalCode: firstRecord.postalCode,
-      phoneNumbers: firstRecord.phoneNumbers,
-      emailDomain: firstRecord.emailDomain,
-      dobText: firstRecord.dobText,
-      hasSsn: firstRecord.hasSsn,
-      age: firstRecord.age,
-      flags: firstRecord.flags,
-      completenessScore: firstRecord.completenessScore,
-      normalizedTarget: firstRecord.normalizedTarget,
+      firstName,
+      lastName,
+      street: rawRecord.addressRaw ?? "",
+      city: rawRecord.city ?? "",
+      state: rawRecord.state ?? "",
+      zipCode: rawRecord.postalCode ?? "",
+      dob: rawRecord.dobText ?? "",
+      annualIncome: "",  // TODO: extract from text if present
+      email: rawRecord.email ?? "",
+      phone: rawRecord.phoneNumbers[0] ?? "",
+      telegramChatId: chatId,
+      sourceLabel: safeRecord.sourceLabel,
+      cityMeta: safeRecord.city,
+      stateMeta: safeRecord.state,
+      postalCodeMeta: safeRecord.postalCode,
+      phoneNumbers: safeRecord.phoneNumbers,
+      emailDomain: safeRecord.emailDomain,
+      dobText: safeRecord.dobText,
+      hasSsn: safeRecord.hasSsn,
+      age: safeRecord.age,
+      flags: safeRecord.flags,
+      completenessScore: safeRecord.completenessScore,
+      normalizedTarget: safeRecord.normalizedTarget,
     };
 
-    // Use safe-test mode for Telegram-sourced jobs (no external calls)
     const result = await createSingleJob(
       {
         requestMode: "single",
         queueName: "telegram",
         priority: 80,
         payload,
-        safeTestMode: true,
+        safeTestMode,
       },
       { source: "telegram" },
     );
 
     const publicId = result.data.job.publicId;
-    const resultJson = result.data.job.resultJson as { oneCsResult?: { creditScore?: number | null; productScore?: number; status?: string; source?: string; priceUsd?: number } } | null;
-    const oneCs = resultJson?.oneCsResult ?? null;
+
+    // Track job for polling if in real mode
+    if (!safeTestMode) {
+      pendingBotJobs.set(chatId, publicId);
+      void pollBotJobUntilDone(publicId, chatId);
+    }
 
     // Acknowledge receipt
     await tgSendMessage(chatId, buildJobAcceptedMessage(publicId));
 
-    // Simulate async result delivery (safe test is synchronous)
-    if (oneCs) {
-      await tgSendMessage(chatId, buildJobResultMessage({
-        creditScore: oneCs.creditScore ?? null,
-        productScore: oneCs.productScore ?? 0,
-        status: oneCs.status ?? "unknown",
-        source: oneCs.source ?? "unknown",
-        priceUsd: oneCs.priceUsd ?? 0,
-      }));
+    // Safe-test: result is synchronous, show it immediately
+    if (safeTestMode) {
+      const resultJson = result.data.job.resultJson as { oneCsResult?: { creditScore?: number | null; productScore?: number; status?: string; source?: string; priceUsd?: number } } | null;
+      const oneCs = resultJson?.oneCsResult ?? null;
+      if (oneCs) {
+        await tgSendMessage(chatId, buildJobResultMessage({
+          creditScore: oneCs.creditScore ?? null,
+          productScore: oneCs.productScore ?? 0,
+          status: oneCs.status ?? "unknown",
+          source: oneCs.source ?? "unknown",
+          priceUsd: oneCs.priceUsd ?? 0,
+        }));
+      }
     }
   } else {
-    // No parseable data — create generic job
+    // No parseable data — create generic job in safe-test mode (no browser automation)
+    const safeTestMode = true;
     const result = await createSingleJob(
       {
         requestMode: "single",

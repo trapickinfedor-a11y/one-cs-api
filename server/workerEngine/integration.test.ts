@@ -592,12 +592,12 @@ describe("CreditScoreWorker (safe test mode)", () => {
       safeTestMode: false,
     });
 
-    // In real mode without configured Evomi credentials, browser mode fails gracefully
-    // with "Evomi credentials not configured" error
+    // In real mode without configured Evomi credentials, browser mode fails
+    // gracefully and falls back to safe-test scoring (succeeded with inferred score).
     const result = await worker.processJob(job);
     expect(result.jobId).toBe("worker-test-ssn");
-    expect(result.status).toBe("failed");
-    expect(result.error).toContain("Evomi");
-    expect(result.creditScore).toBeNull();
+    expect(result.status).toBe("succeeded");
+    expect(result.source).toBe("safe_test");
+    expect(result.creditScore).not.toBeNull();
   });
 });

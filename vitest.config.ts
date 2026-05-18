@@ -20,5 +20,8 @@ export default defineConfig({
       "client/**/*.test.ts",
       "client/**/*.spec.ts",
     ],
+    // Browser E2E tests (Playwright) make external requests that can take 5-30s
+    // due to anti-bot protection (cloudflare/captcha). Increase global timeout.
+    testTimeout: 90_000,
   },
 });

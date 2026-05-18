@@ -3,10 +3,19 @@
 ## ✅ Завершено
 
 ### 1. Стабилизация тестов
-- 542 теста проходят
+- 625 тестов проходят
 - Secret validation тесты скипнуты если файл не найден
 
-### 2. REST API Endpoints
+### 2. Browser Automation — WorkerPool (НОВОЕ)
+- WorkerPool wired to REST API
+- Safe-test fallback: browser failure → graceful score inference
+- SSN flow: integrated into browser automation (`_handleSsnStep`)
+- Better error messages: anti-bot challenge detection
+
+### 3. Score Extraction (НОВОЕ)
+- Improved patterns: `score[\s:]+(\d{3})`, `transunion.*?(\d{3})`
+
+### 4. REST API Endpoints
 ```
 POST /api/v1/requests/single     ✅
 POST /api/v1/requests/bulk       ✅
@@ -19,14 +28,14 @@ GET  /api/v1/usage/summary      ✅
 GET  /api/v1/health            ✅
 ```
 
-### 3. Worker Polling Endpoints (НОВОЕ)
+### 5. Worker Polling Endpoints (НОВОЕ)
 ```
 GET  /api/v1/queue/next        ✅ (worker polling)
 PUT  /api/v1/jobs/:id/start    ✅ (mark job running)
 PUT  /api/v1/jobs/:id/complete ✅ (mark job completed/failed)
 ```
 
-### 4. Database helpers
+### 6. Database helpers
 ```
 getQueuedJobs()          ✅
 updateJobStatus()        ✅
@@ -68,7 +77,7 @@ addJobEvent()            ✅
 
 | Метрика | Значение |
 |---------|---------|
-| Тесты | 542 ✅ |
+| Тесты | 625 ✅ |
 | REST Endpoints | 11 |
 | Worker Endpoints | 3 |
 | Строк кода | ~1900 (platformService) |

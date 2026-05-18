@@ -360,7 +360,7 @@ describe("FingerprintRotator", () => {
     expect(fp.screenWidth).toBeGreaterThan(0);
     expect(fp.screenHeight).toBeGreaterThan(0);
     expect([1366, 1440, 1536, 1280, 1600, 1280, 1024, 1680, 1920, 2560, 1360]).toContain(fp.screenWidth);
-    expect(fp.timezone).toMatch(/^America\//);
+    expect(fp.timezone).toMatch(/^(America|Pacific)\//);
     expect(Array.isArray(fp.languages)).toBe(true);
     expect(fp.languages.length).toBeGreaterThan(0);
     expect(fp.platform).toMatch(/^(Win32|MacIntel|Linux x86_64)$/);

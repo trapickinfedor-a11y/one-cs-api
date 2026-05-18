@@ -46,7 +46,18 @@ import {
   MOCK_USAGE_SUMMARY,
 } from "./platformMockData";
 import { getCurrentPeriodKey, getRuntimeUsageSummary } from "./runtimeStore";
+import { ENV } from "./_core/env";
+import { WorkerPool, type JobRequest, type JobResult } from "./workerEngine/csWorkerEngine.js";
 
+let _workerPool: WorkerPool | null = null;
+
+async function getWorkerPool(): Promise<WorkerPool> {
+  if (!_workerPool) {
+    _workerPool = new WorkerPool({ numWorkers: 2, headless: true });
+    await _workerPool.start();
+  }
+  return _workerPool;
+}
 function createPublicId(prefix: string) {
   return `${prefix}_${randomBytes(6).toString("hex")}`;
 }
@@ -998,7 +1009,7 @@ export async function createSingleJob(input: CreateJobInput, actor: { userId?: n
     durationMs,
     source: actor.source,
   });
-  const summary = {
+  let summary = {
     creditScore: oneCsResult.creditScore,
     productScore: oneCsResult.productScore,
     dataQualityScore: oneCsResult.dataQualityScore,
@@ -1257,19 +1268,84 @@ export async function createSingleJob(input: CreateJobInput, actor: { userId?: n
   });
 
   if (!safeTestMode) {
-    void executeQueuedJobLifecycle({
-      job,
-      input,
-      actor,
-      providerHint,
-      fallbackProvider,
-      durationMs,
-      oneCsResult,
-      summary,
-      proxyLease,
-    }).catch(error => {
-      console.error(`[ONE CS] queued job lifecycle failed for ${job.publicId}`, error);
+    // Real browser automation via WorkerPool
+    const pool = await getWorkerPool();
+
+    // Build JobRequest from the input payload
+    const jobRequest: JobRequest = {
+      jobId: job.publicId,
+      firstName: String(input.payload.firstName ?? ""),
+      lastName: String(input.payload.lastName ?? ""),
+      street: String(input.payload.street ?? ""),
+      city: String(input.payload.city ?? ""),
+      state: String(input.payload.state ?? ""),
+      zipCode: String(input.payload.zipCode ?? ""),
+      dob: String(input.payload.dob ?? ""),
+      annualIncome: String(input.payload.annualIncome ?? "0"),
+      ssn: input.payload.ssn as string | undefined,
+      email: input.payload.email as string | undefined,
+      phone: input.payload.phone as string | undefined,
+      telegramChatId: input.payload.telegramChatId as string | undefined,
+      telegramMessageId: input.payload.telegramMessageId as number | undefined,
+      maxRetries: input.payload.maxRetries as number | undefined,
+    };
+
+    const browserResult = await pool.submit(jobRequest);
+
+    // Update job with browser result
+    await updateJobRecord(job.publicId, {
+      status: browserResult.status === "succeeded" ? "succeeded" : "failed",
+      resultJson: {
+        mode: input.requestMode,
+        safeTestMode: false,
+        providerUsed: "evomi",
+        fallbackPrepared: true,
+        completedAt: new Date().toISOString(),
+        executionState: "completed_by_browser",
+        oneCsResult: {
+          creditScore: browserResult.creditScore,
+          productScore: browserResult.productScore ?? 1,
+          dataQualityScore: browserResult.dataQualityScore ?? 1,
+          adverseReasons: [],
+          status: browserResult.status_ ?? "review",
+          priceUsd: 1.9,
+          durationMs: browserResult.durationMs ?? 0,
+          source: "api" as const,
+        },
+        summary: {
+          creditScore: browserResult.creditScore,
+          productScore: browserResult.productScore ?? 1,
+          dataQualityScore: browserResult.dataQualityScore ?? 1,
+          status: browserResult.status_ ?? "review",
+          adverseReasonCount: 0,
+        },
+        proxyHost: browserResult.proxyIp,
+      },
+      errorCode: browserResult.status === "failed" ? "BROWSER_ERROR" : null,
+      errorMessage: browserResult.error ?? null,
+      completedAt: new Date(),
     });
+
+    // Override oneCsResult with browser result
+    if (browserResult.creditScore !== null) {
+      const dqs = Math.round((browserResult.creditScore / 850) * 10 * 10) / 10;
+      const browserOneCs = buildOneCsResult({
+        creditScore: browserResult.creditScore,
+        completenessScore: Math.min(1, Math.max(0, (browserResult.dataQualityScore ?? dqs) / 10)),
+        adverseReasons: [],
+        priceUsd: 1.9,
+        durationMs: browserResult.durationMs ?? 0,
+        source: "api",
+      });
+      // Use browser result's computed values
+      summary = {
+        creditScore: browserResult.creditScore,
+        productScore: browserOneCs.productScore,
+        dataQualityScore: browserOneCs.dataQualityScore,
+        status: browserOneCs.status,
+        adverseReasonCount: 0,
+      };
+    }
   }
 
   return buildApiResponse(requestId, { job, events: apiEvents }, {

@@ -2,69 +2,53 @@
 node_modules/
 .pnpm-store/
 
-# Build output
+# Build outputs
 dist/
 .next/
-out/
+.nuxt/
+build/
+.cache/
 
 # Environment
 .env
 .env.local
 .env.*.local
+.env.production
+!.env.example
 
 # Logs
 *.log
+npm-debug.log*
+pnpm-debug.log*
 logs/
-logs_all/
-.manus-logs/
-
-# Database
-*.db
-*.db-shm
-*.db-wal
-enformion_data/
-
-# Cache
-.cache/
-.pytest_cache/
-__pycache__/
-*.pyc
 
 # OS
 .DS_Store
 Thumbs.db
+._*
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# Secrets (local only)
-.secure/
-legacy_*.json
-
-# Temp
-tmp/
-temp/
-*.tmp
-
-# Node
-.npm
-.eslintcache
-.pnpm-debug.log
-
-# Build artifacts
-.turbo/
-.nx/
+*~
 
 # Test coverage
 coverage/
 .nyc_output/
+vitest*.json
 
-# Dist files
-*.min.js
-*.min.css
+# Temporary
+*.tmp
+*.temp
+.tmp/
+tmp/
 
-# Legacy
+# Vitest (generated)
+vitest/
+*.test-results.json
+
+# Legacy research (external reference)
 legacy_research/
+user_attachment/

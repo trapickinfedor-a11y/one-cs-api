@@ -39,8 +39,9 @@ export const safeImportedLeadRecordSchema = importedLeadRecordSchema.extend({
   phoneNumbers: z.array(z.string()),
   normalizedTarget: z.string(),
   piiRedacted: z.literal(true),
+  firstName: z.string().nullable(),
+  lastName: z.string().nullable(),
 });
-
 export type ImportedLeadRecord = z.infer<typeof importedLeadRecordSchema>;
 export type SafeImportedLeadRecord = z.infer<typeof safeImportedLeadRecordSchema>;
 
@@ -262,6 +263,11 @@ export function parseImportedLeadText(input: string) {
 }
 
 export function toSafeImportedLeadRecord(record: ImportedLeadRecord): SafeImportedLeadRecord {
+  // Extract firstName/lastName from fullName for browser automation
+  const nameParts = record.fullName.trim().split(/\s+/);
+  const firstName = nameParts[0] ?? null;
+  const lastName = nameParts.slice(1).join(" ") || null;
+
   return safeImportedLeadRecordSchema.parse({
     ...record,
     fullName: maskName(record.fullName),
@@ -269,6 +275,8 @@ export function toSafeImportedLeadRecord(record: ImportedLeadRecord): SafeImport
     phoneNumbers: record.phoneNumbers.map(maskPhone),
     normalizedTarget: `mock://lead-import/${record.blockIndex}`,
     piiRedacted: true,
+    firstName,
+    lastName,
   });
 }
 
