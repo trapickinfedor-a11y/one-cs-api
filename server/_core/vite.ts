@@ -32,8 +32,9 @@ export async function setupVite(app: Express, server: Server) {
   });
 
   app.use(vite.middlewares);
-  app.use("*", async (req, res, next) => {
+  app.use("*", async (req: any, res: any, next: any) => {
     const url = req.originalUrl;
+    if (req.originalUrl.startsWith('/api/')) return next();
 
     try {
       const clientRoot = resolveClientRoot();

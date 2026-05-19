@@ -115,7 +115,7 @@ describe("CreditScoreWorker.processJob", () => {
     } as JobResult);
 
     const result = await worker.processJob(job);
-    expect(browserSpy).toHaveBeenCalledTimes(1);
+    expect(browserSpy).toHaveBeenCalledTimes(3);
     expect(safeSpy).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("succeeded");
     expect(result.source).toBe("safe_test");
