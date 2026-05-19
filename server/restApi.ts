@@ -184,6 +184,98 @@ export function registerRestApi(app: express.Express) {
       });
     }
 
+    const payload = parsed.data.payload as Record<string, unknown>;
+
+    // Additional field-level validation
+    const dobStr = payload.dob;
+    if (typeof dobStr !== "string") {
+      return sendValidationError(res, requestId, "Invalid DOB format. Expected: MM/DD/YYYY (e.g. 01/15/1985)", {
+        field: "dob",
+        expected: "MM/DD/YYYY",
+        received: String(dobStr),
+      });
+    }
+    const dobMatch = dobStr.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (!dobMatch) {
+      return sendValidationError(res, requestId, "Invalid DOB format. Expected: MM/DD/YYYY (e.g. 01/15/1985)", {
+        field: "dob",
+        expected: "MM/DD/YYYY",
+        received: dobStr,
+      });
+    }
+    const month = parseInt(dobMatch[1], 10);
+    const day = parseInt(dobMatch[2], 10);
+    if (month < 1 || month > 12) {
+      return sendValidationError(res, requestId, "Invalid month in DOB. Must be 01-12", {
+        field: "dob",
+        received: dobStr,
+      });
+    }
+    if (day < 1 || day > 31) {
+      return sendValidationError(res, requestId, "Invalid day in DOB. Must be 01-31", {
+        field: "dob",
+        received: dobStr,
+      });
+    }
+
+    const stateStr = payload.state;
+    if (typeof stateStr !== "string" || !/^[A-Z]{2}$/i.test(stateStr)) {
+      return sendValidationError(res, requestId, "Invalid state. Expected 2-letter US state code (e.g. CA, NY, TX)", {
+        field: "state",
+        expected: "2-letter state code (e.g. CA)",
+        received: String(stateStr ?? ""),
+      });
+    }
+
+    const zipStr = payload.zipCode;
+    if (typeof zipStr !== "string" || !/^\d{5}(-\d{4})?$/.test(zipStr)) {
+      return sendValidationError(res, requestId, "Invalid ZIP code. Expected 5 digits (e.g. 78701) or 9 digits (e.g. 78701-1234)", {
+        field: "zipCode",
+        expected: "5 or 9 digit US ZIP code",
+        received: String(zipStr ?? ""),
+      });
+    }
+
+    const ssnStr = payload.ssn;
+    if (ssnStr && typeof ssnStr === "string" && !/^\d{3}-\d{2}-\d{4}$/.test(ssnStr)) {
+      return sendValidationError(res, requestId, "Invalid SSN format. Expected: XXX-XX-XXXX (e.g. 123-45-6789)", {
+        field: "ssn",
+        expected: "XXX-XX-XXXX",
+        received: ssnStr ? "***-**-" + ssnStr.slice(-4) : undefined,
+      });
+    }
+
+    const emailStr = payload.email;
+    if (emailStr && typeof emailStr === "string" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailStr)) {
+      return sendValidationError(res, requestId, "Invalid email format.", {
+        field: "email",
+        expected: "valid email address",
+        received: emailStr,
+      });
+    }
+
+    const phoneStr = payload.phone;
+    if (phoneStr && typeof phoneStr === "string") {
+      const digits = phoneStr.replace(/\D/g, "");
+      if (digits.length < 10 || digits.length > 11) {
+        return sendValidationError(res, requestId, "Invalid phone format. Expected 10 or 11 digits.", {
+          field: "phone",
+          expected: "10 or 11 digit phone number",
+          received: phoneStr,
+        });
+      }
+    }
+
+    const incomeStr = payload.annualIncome;
+    const income = parseInt(String(incomeStr ?? ""), 10);
+    if (isNaN(income) || income <= 0) {
+      return sendValidationError(res, requestId, "Invalid annual income. Must be a positive number.", {
+        field: "annualIncome",
+        expected: "positive number (e.g. 65000)",
+        received: String(incomeStr ?? ""),
+      });
+    }
+
     const client = res.locals.apiClient as ApiClient;
     if (client.scope === "single" || client.scope === "bulk" || client.scope === "vip" || client.scope === "admin") {
       const result = await createSingleJob(parsed.data, { userId: client.userId ?? undefined, source: "api" });
@@ -200,6 +292,97 @@ export function registerRestApi(app: express.Express) {
       return sendValidationError(res, requestId, "Invalid bulk request payload.", {
         issues: parsed.error.flatten(),
       });
+    }
+
+    // Validate each item's payload field-level
+    for (let i = 0; i < parsed.data.items.length; i++) {
+      const item = parsed.data.items[i];
+      const payload = item.payload as Record<string, unknown>;
+      const itemId = item.externalId ?? `item[${i}]`;
+
+      const dobStr = payload.dob;
+      if (typeof dobStr === "string") {
+        const dobMatch = dobStr.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        if (!dobMatch) {
+          return sendValidationError(res, requestId, `Invalid DOB format in ${itemId}. Expected: MM/DD/YYYY (e.g. 01/15/1985)`, {
+            field: "dob",
+            expected: "MM/DD/YYYY",
+            received: dobStr,
+          });
+        }
+        const month = parseInt(dobMatch[1], 10);
+        const day = parseInt(dobMatch[2], 10);
+        if (month < 1 || month > 12) {
+          return sendValidationError(res, requestId, `Invalid month in DOB for ${itemId}. Must be 01-12`, {
+            field: "dob",
+            received: dobStr,
+          });
+        }
+        if (day < 1 || day > 31) {
+          return sendValidationError(res, requestId, `Invalid day in DOB for ${itemId}. Must be 01-31`, {
+            field: "dob",
+            received: dobStr,
+          });
+        }
+      }
+
+      const stateStr = payload.state;
+      if (typeof stateStr !== "string" || !/^[A-Z]{2}$/i.test(stateStr)) {
+        return sendValidationError(res, requestId, `Invalid state in ${itemId}. Expected 2-letter US state code (e.g. CA, NY, TX)`, {
+          field: "state",
+          expected: "2-letter state code (e.g. CA)",
+          received: String(stateStr ?? ""),
+        });
+      }
+
+      const zipStr = payload.zipCode;
+      if (typeof zipStr !== "string" || !/^\d{5}(-\d{4})?$/.test(zipStr)) {
+        return sendValidationError(res, requestId, `Invalid ZIP code in ${itemId}. Expected 5 digits (e.g. 78701) or 9 digits (e.g. 78701-1234)`, {
+          field: "zipCode",
+          expected: "5 or 9 digit US ZIP code",
+          received: String(zipStr ?? ""),
+        });
+      }
+
+      const ssnStr = payload.ssn;
+      if (ssnStr && typeof ssnStr === "string" && !/^\d{3}-\d{2}-\d{4}$/.test(ssnStr)) {
+        return sendValidationError(res, requestId, `Invalid SSN format in ${itemId}. Expected: XXX-XX-XXXX (e.g. 123-45-6789)`, {
+          field: "ssn",
+          expected: "XXX-XX-XXXX",
+          received: ssnStr ? "***-**-" + ssnStr.slice(-4) : undefined,
+        });
+      }
+
+      const emailStr = payload.email;
+      if (emailStr && typeof emailStr === "string" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailStr)) {
+        return sendValidationError(res, requestId, `Invalid email format in ${itemId}.`, {
+          field: "email",
+          expected: "valid email address",
+          received: emailStr,
+        });
+      }
+
+      const phoneStr = payload.phone;
+      if (phoneStr && typeof phoneStr === "string") {
+        const digits = phoneStr.replace(/\D/g, "");
+        if (digits.length < 10 || digits.length > 11) {
+          return sendValidationError(res, requestId, `Invalid phone format in ${itemId}. Expected 10 or 11 digits.`, {
+            field: "phone",
+            expected: "10 or 11 digit phone number",
+            received: phoneStr,
+          });
+        }
+      }
+
+      const incomeStr = payload.annualIncome;
+      const income = parseInt(String(incomeStr ?? ""), 10);
+      if (isNaN(income) || income <= 0) {
+        return sendValidationError(res, requestId, `Invalid annual income in ${itemId}. Must be a positive number.`, {
+          field: "annualIncome",
+          expected: "positive number (e.g. 65000)",
+          received: String(incomeStr ?? ""),
+        });
+      }
     }
 
     const client = res.locals.apiClient as ApiClient;
@@ -291,17 +474,16 @@ export function registerRestApi(app: express.Express) {
 
   // ─── Worker polling endpoints ───────────────────────────────────────────
 
-  // GET /api/v1/queue/next — worker polls for next queued job
   router.get("/queue/next", async (req, res) => {
     const requestId = res.locals.requestId as string;
     const workerId = (req.query.workerId as string) || "worker-1";
-    
+
     const jobs = await getQueuedJobs(1);
-    
+
     if (!jobs.length) {
       return res.json(buildApiResponse(requestId, { job: null, message: "No jobs in queue" }));
     }
-    
+
     const job = jobs[0];
     return res.json(buildApiResponse(requestId, {
       job: {
@@ -315,7 +497,6 @@ export function registerRestApi(app: express.Express) {
     }));
   });
 
-  // PUT /api/v1/jobs/:publicId/start — mark job as running
   router.put("/jobs/:publicId/start", async (req, res) => {
     const requestId = res.locals.requestId as string;
     const { publicId } = req.params;
@@ -339,7 +520,6 @@ export function registerRestApi(app: express.Express) {
     return res.json(buildApiResponse(requestId, { status: "running", publicId }));
   });
 
-  // PUT /api/v1/jobs/:publicId/complete — mark job as completed/failed
   router.put("/jobs/:publicId/complete", async (req, res) => {
     const requestId = res.locals.requestId as string;
     const { publicId } = req.params;
@@ -383,7 +563,7 @@ export function registerRestApi(app: express.Express) {
   // ─── Usage summary ────────────────────────────────────────────────────
 
   router.get("/usage/summary", async (_req, res) => {
-    const requestId = res.locals.requestId as string;
+    const requestId = getRequestId();
     const usage = await getApiUsageSummary();
     return res.json(buildApiResponse(requestId, usage));
   });

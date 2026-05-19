@@ -1676,6 +1676,7 @@ export async function sendTelegramMessage(params: {
   chatId: string;
   text: string;
   parseMode?: "plain" | "html" | "markdown";
+  replyMarkup?: { inline_keyboard?: Array<Array<{ text: string; callback_data?: string; url?: string }>> };
 }) {
   const parseMode = params.parseMode ?? "html";
   const body: Record<string, unknown> = {
@@ -1683,6 +1684,9 @@ export async function sendTelegramMessage(params: {
     text: params.text,
     disable_web_page_preview: true,
   };
+  if (params.replyMarkup) {
+    body.reply_markup = params.replyMarkup;
+  }
   if (parseMode !== "plain") {
     body.parse_mode = parseMode;
   }

@@ -29,6 +29,9 @@ const PROXY_TEST_TIMEOUT_MS = 10_000;
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_RESET_MS = 60_000;
 
+ let _evomiCircuitOpenUntil = 0;
+ const EVOMI_RATE_LIMIT_RESET_MS = 60_000;
+
 // === Types ===
 
 export interface ProxyLease {
@@ -336,10 +339,17 @@ async function dataImpulseCreateSession(opts: {
     signal: AbortSignal.timeout(12_000),
   });
 
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "unknown");
-    throw new Error(`DataImpulse API ${resp.status}: ${body}`);
-  }
+   if (!resp.ok) {
+     const body = await resp.text().catch(() => "unknown");
+
+     // If Evomi rate-limit (429) during fallback, open Evomi circuit too
+     if (resp.status === 429) {
+       _evomiCircuitOpenUntil = Date.now() + EVOMI_RATE_LIMIT_RESET_MS;
+       console.warn(`[ProxyManager] Evomi rate-limit detected (429), opening Evomi circuit for ${EVOMI_RATE_LIMIT_RESET_MS / 1000}s`);
+     }
+
+     throw new Error(`DataImpulse API ${resp.status}: ${body}`);
+   }
 
   const data = await resp.json() as {
     id: string;
@@ -434,36 +444,43 @@ export async function acquireProxy(opts: ProxyAcquireOptions = {}): Promise<Prox
     }
   }
 
-  // --- Step 4: Acquire from Evomi (standard HTTP proxy) ---
-  if (isEvomiConfigured()) {
-    const rotatedFrom = inMemory?.lease.leaseId ?? null;
-    const rotatedReason = inMemory ? "rotation_after_n_success" : null;
-    const lease = buildEvomiLease(opts, null, rotatedFrom, rotatedReason);
+   // --- Step 4: Acquire from Evomi (standard HTTP proxy) ---
+   // Check Evomi rate-limit circuit breaker first
+   if (isEvomiConfigured()) {
+     if (_evomiCircuitOpenUntil > Date.now()) {
+       console.warn(`[ProxyManager] Evomi rate-limit circuit open, falling back to DataImpulse`);
+     } else {
+       const rotatedFrom = inMemory?.lease.leaseId ?? null;
+       const rotatedReason = inMemory ? "rotation_after_n_success" : null;
+       const lease = buildEvomiLease(opts, null, rotatedFrom, rotatedReason);
 
-    // Test connection and get assigned IP
-    const assignedIp = await fetchThroughProxy(lease);
-    if (assignedIp) {
-      lease.assignedIp = assignedIp;
-      console.info(
-        `[ProxyManager] Evomi sticky session lease=${lease.leaseId} ip=${assignedIp} ` +
-          `sessionKey=${lease.sessionKey} rotateAfter=${rotateAfterN}`,
-      );
-    } else {
-      console.warn(`[ProxyManager] Evomi proxy connected but IP fetch failed — will retry on first use`);
-    }
+       // Test connection and get assigned IP
+       const assignedIp = await fetchThroughProxy(lease);
+       if (assignedIp) {
+         lease.assignedIp = assignedIp;
+         // Reset rate-limit circuit on successful connection
+         _evomiCircuitOpenUntil = 0;
+         console.info(
+           `[ProxyManager] Evomi sticky session lease=${lease.leaseId} ip=${assignedIp} ` +
+             `sessionKey=${lease.sessionKey} rotateAfter=${rotateAfterN}`,
+         );
+       } else {
+         console.warn(`[ProxyManager] Evomi proxy connected but IP fetch failed — will retry on first use`);
+       }
 
-    _activeSessions.set(cacheKey, {
-      lease,
-      successCount: 1,
-      errorCount: 0,
-      lastUsedAt: new Date(),
-      circuitBreakerFailures: 0,
-      circuitOpenedAt: null,
-    });
+       _activeSessions.set(cacheKey, {
+         lease,
+         successCount: 1,
+         errorCount: 0,
+         lastUsedAt: new Date(),
+         circuitBreakerFailures: 0,
+         circuitOpenedAt: null,
+       });
 
-    await redisSet(cacheKey, JSON.stringify(lease), 3600);
-    return lease;
-  }
+       await redisSet(cacheKey, JSON.stringify(lease), 3600);
+       return lease;
+     }
+   }
 
   // --- Step 5: DataImpulse fallback ---
   if (isDataImpulseConfigured()) {
@@ -661,7 +678,7 @@ export function getActiveSessions(): Array<{
 // === Health check ===
 
 export async function healthCheck(): Promise<{
-  evomi: { configured: boolean; latencyMs: number; status: "healthy" | "degraded" | "disabled" };
+  evomi: { configured: boolean; latencyMs: number; status: "healthy" | "degraded" | "disabled"; rateLimitCircuitOpen: boolean };
   dataImpulse: { configured: boolean; status: "healthy" | "degraded" | "disabled" };
   redis: { configured: boolean; status: "healthy" | "degraded" | "disabled" };
   activeSessions: number;
@@ -697,12 +714,17 @@ const evomiPasswordForHealth = evomiRawPassword ? `${evomiRawPassword}_country-U
   const circuitOpenCount = Array.from(_activeSessions.values()).filter(s => isCircuitOpen(s)).length;
 
   return {
-    evomi: { configured: evomiConfigured, latencyMs: evomiLatencyMs, status: evomiStatus },
-    dataImpulse: { configured: isDataImpulseConfigured(), status: isDataImpulseConfigured() ? "healthy" : "disabled" },
-    redis: { configured: redisConfigured, status: redisStatus },
-    activeSessions: _activeSessions.size,
-    circuitOpenCount,
-  };
+     evomi: {
+       configured: evomiConfigured,
+       latencyMs: evomiLatencyMs,
+       status: evomiStatus,
+       rateLimitCircuitOpen: _evomiCircuitOpenUntil > Date.now(),
+     },
+     dataImpulse: { configured: isDataImpulseConfigured(), status: isDataImpulseConfigured() ? "healthy" : "disabled" },
+     redis: { configured: redisConfigured, status: redisStatus },
+     activeSessions: _activeSessions.size,
+     circuitOpenCount,
+   };
 }
 
 // === Shutdown ===

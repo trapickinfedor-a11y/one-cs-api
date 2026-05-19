@@ -55,6 +55,21 @@ export const proxyConfigSchema = z.object({
   maxProviderSwitches: z.number().int().min(0).max(10).default(1),
 });
 
+
+export const createJobPayloadSchema = z.object({
+  firstName: z.string().min(1, "firstName is required").max(100),
+  lastName: z.string().min(1, "lastName is required").max(100),
+  street: z.string().min(1, "street is required").max(200),
+  city: z.string().min(1, "city is required").max(100),
+  state: z.string().length(2, "state must be 2-letter code (e.g. CA)").toUpperCase(),
+  zipCode: z.string().regex(/^\d{5}(-\d{4})?$/, "zipCode must be 5 or 9 digits"),
+  dob: z.string().regex(/^\d{2}\/\d{2}\/\d{4}$/, "dob must be MM/DD/YYYY"),
+  annualIncome: z.string().regex(/^\d+$/, "annualIncome must be numeric"),
+  email: z.string().email().optional(),
+  phone: z.string().optional(),
+  ssn: z.string().regex(/^\d{3}-\d{2}-\d{4}$/).optional(),
+});
+
 export const createJobSchema = z.object({
   requestMode: z.enum(requestModes),
   targetLabel: z.string().max(191).optional(),

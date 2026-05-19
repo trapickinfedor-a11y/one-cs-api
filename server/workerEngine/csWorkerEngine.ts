@@ -201,6 +201,11 @@ export class CreditScoreWorker {
   private _running = false;
   private _activeBrowser = false;
 
+  private _antibotFailures = 0;
+  private _antibotCircuitOpenUntil = 0;
+  private static readonly ANTIBOT_CIRCUIT_THRESHOLD = 3;
+  private static readonly ANTIBOT_CIRCUIT_RESET_MS = 120_000;
+
   constructor(opts: {
     workerId: number;
     safeTestMode?: boolean;
@@ -218,51 +223,118 @@ export class CreditScoreWorker {
   get workerId(): number { return this._workerId; }
   get isRunning(): boolean { return this._running; }
 
+  // Circuit breaker for anti-bot
+  private _antibotCircuitOpen(): boolean {
+    if (this._antibotFailures < CreditScoreWorker.ANTIBOT_CIRCUIT_THRESHOLD) return false;
+    if (Date.now() > this._antibotCircuitOpenUntil) { this._antibotFailures = 0; return false; }
+    return true;
+  }
+  private _recordAntibotFailure(): void {
+    this._antibotFailures++;
+    if (this._antibotFailures >= CreditScoreWorker.ANTIBOT_CIRCUIT_THRESHOLD) {
+      this._antibotCircuitOpenUntil = Date.now() + CreditScoreWorker.ANTIBOT_CIRCUIT_RESET_MS;
+    }
+  }
+  private _recordAntibotSuccess(): void {
+    this._antibotFailures = Math.max(0, this._antibotFailures - 1);
+  }
+  private _classifyError(err: string): "TRANSIENT" | "ANTIBOT" | "PERMANENT" {
+    const m = err.toLowerCase();
+    if (m.includes("timeout") || m.includes("net::") || m.includes("connection") || m.includes("crash") || m.includes("closed")) return "TRANSIENT";
+    if (m.includes("challenge") || m.includes("captcha") || m.includes("cloudflare") || m.includes("not visible")) { this._recordAntibotFailure(); return "ANTIBOT"; }
+    if (m.includes("rate_limited") || m.includes("429") || m.includes("too many requests")) { this._recordAntibotFailure(); return "ANTIBOT"; }
+    return "PERMANENT";
+  }
+
   /**
    * Process a single job (entry point from WorkerPool).
    */
   async processJob(job: JobRequest): Promise<JobResult> {
     const startTime = Date.now();
-    let proxyLeaseId: string | undefined;
-    let proxyIp: string | null = null;
+    const MAX_RETRIES = job.maxRetries ?? 3;
+    const BACKOFF_MS = [1_000, 5_000, 15_000];
 
-    try {
-      this._running = true;
+    if (this._safeTestMode) {
+      const result = this._processSafeMode(job, startTime);
+      if (job.telegramChatId) void this._notifyTelegram(result, job.telegramChatId).catch(() => {});
+      return result;
+    }
 
-      if (this._safeTestMode) {
-        return this._processSafeMode(job, startTime);
-      }
-
-      const proxyOpts: ProxyAcquireOptions = {};
-      if (this._proxyCountry) proxyOpts.country = this._proxyCountry;
-
-      const lease = await acquireProxy(proxyOpts);
-      if (lease) {
-        proxyLeaseId = lease.leaseId;
-        proxyIp = lease.assignedIp;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      // Circuit breaker check
+      if (this._antibotCircuitOpen()) {
+        console.warn(`[Worker ${this._workerId}] Anti-bot circuit open, safe-test fallback`);
+        return this._processSafeTestMode(job, startTime);
       }
 
       try {
-        const result = await this._processBrowserMode(job, lease ?? null);
+        const result = await this._executeWithTimeout(this._runBrowserJob(job, startTime), 90_000);
+
         if (result.status === "failed") {
-          // Browser failed — try safe-test as fallback
-          console.warn(`[Worker ${this._workerId}] Browser failed for job ${job.jobId}: ${result.error}`);
+          const et = this._classifyError(result.error ?? "");
+          if (et === "ANTIBOT" && attempt < MAX_RETRIES - 1) {
+            console.warn(`[Worker ${this._workerId}] Anti-bot attempt ${attempt+1}, retrying...`);
+            await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]));
+            continue;
+          }
+          if (et === "TRANSIENT" && attempt < MAX_RETRIES - 1) {
+            console.warn(`[Worker ${this._workerId}] Transient error, retrying...`);
+            await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]));
+            continue;
+          }
           return this._processSafeTestMode(job, startTime);
         }
-        return { ...result, proxyLeaseId, proxyIp, durationMs: Date.now() - startTime };
-      } finally {
-        if (lease) {
-          await releaseProxy({ leaseId: lease.leaseId, success: true });
+
+        this._recordAntibotSuccess();
+        return result;
+      } catch (err) {
+        const et = this._classifyError(err instanceof Error ? err.message : String(err));
+        if (et !== "PERMANENT" && attempt < MAX_RETRIES - 1) {
+          console.warn(`[Worker ${this._workerId}] Crash on attempt ${attempt+1}, retrying...`);
+          await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]));
+          continue;
         }
+        return this._processSafeTestMode(job, startTime);
       }
-    } catch (err) {
-      // Browser crashed — safe-test fallback
-      const error = err instanceof Error ? err.message : String(err);
-      console.error(`[Worker ${this._workerId}] Browser crashed for job ${job.jobId}: ${error}`);
-      return this._processSafeTestMode(job, startTime);
+    }
+    return this._processSafeTestMode(job, startTime);
+  }
+
+  private async _runBrowserJob(job: JobRequest, startTime: number): Promise<JobResult> {
+    this._running = true;
+    let proxyIp: string | null = null;
+    try {
+      const lease = await acquireProxy({});
+      if (lease) proxyIp = lease.assignedIp;
+      try {
+        const result = await this._processBrowserMode(job, lease ?? null);
+        return { ...result, proxyIp, durationMs: Date.now() - startTime };
+      } finally {
+        if (lease) await releaseProxy({ leaseId: lease.leaseId, success: true });
+      }
     } finally {
       this._running = false;
     }
+  }
+  private async _executeWithTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+    const to = new Promise<never>((_, r) => { timer = setTimeout(() => r(new Error(`Timeout after ${ms}ms`)), ms); });
+    try { return await Promise.race([p, to]); } finally { clearTimeout(timer!); }
+  }
+  private async _notifyTelegram(result: JobResult, chatId: string): Promise<void> {
+    const token = process.env.TELEGRAM_BOT_TOKEN ?? process.env.BOT_TOKEN;
+    if (!token) return;
+    const score = result.creditScore ?? "N/A";
+    const status = result.status === "succeeded" ? "OK" : "FAILED";
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: `*[CS] Job ${result.jobId}*\nStatus: ${status}\nScore: ${score}`,
+        parse_mode: "Markdown",
+      }),
+    }).catch(() => {});
   }
 
   // ---------------------------------------------------------------------------
@@ -397,6 +469,13 @@ export class CreditScoreWorker {
 
       // Submit form
       await this._submitForm(acquired.page);
+
+      // Check for rate limit (HTTP 429) after form submission
+      const rateLimitStatus = await acquired.page.evaluate(() => (window as any).__rateLimitStatus__);
+      if (rateLimitStatus === 429) {
+        this._recordAntibotFailure();
+        throw new Error('RATE_LIMITED: universal-credit.com returned 429');
+      }
 
       // Wait for result page (adverse-page or offer-page)
       const resultUrl = await this._waitForResult(acquired.page, FORM_TIMEOUT_MS);
@@ -660,6 +739,12 @@ export class CreditScoreWorker {
         await continueBtn.click();
       }
     }
+  }
+
+  private async _resumeJobWithSsn(jobId: string, ssn: string): Promise<void> {
+    // This would be called from the bot webhook when SSN is received
+    // For now, just log
+    console.log(`[Worker ${this._workerId}] Would resume job ${jobId} with SSN ending in ${ssn.slice(-4)}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -1024,6 +1109,9 @@ export class WorkerPool {
   private _started = false;
   private _browserPool: BrowserPool;
 
+  private _watchdogTimer: NodeJS.Timeout | null = null;
+  private static readonly STUCK_JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
   constructor(config: WorkerEngineConfig = {}) {
     this._numWorkers = config.numWorkers ?? 2;
     this._safeTestMode = config.safeTestMode ?? !ENV.evomiUsername;
@@ -1053,14 +1141,23 @@ export class WorkerPool {
     for (let i = 0; i < this._numWorkers; i++) {
       void this._workerLoop(i);
     }
-  }
 
+    // Watchdog for stuck jobs
+    this._watchdogTimer = setInterval(() => {
+      void this._checkStuckJobs();
+    }, 60_000);
+  }
   async stop(): Promise<void> {
     this._started = false;
     for (let i = 0; i < this._running.length; i++) {
       this._running[i] = false;
     }
     await this._browserPool.shutdown();
+
+    if (this._watchdogTimer) {
+      clearInterval(this._watchdogTimer);
+      this._watchdogTimer = null;
+    }
   }
 
   /**
@@ -1124,12 +1221,19 @@ export class WorkerPool {
     }
   }
 
+
   private _dispatch(event: WorkerPoolEvent): void {
     try {
       this._onEvent?.(event);
     } catch (err) {
       console.error("[WorkerPool] Event handler error:", err);
     }
+  }
+
+  private async _checkStuckJobs(): Promise<void> {
+    // This would check jobs in 'running' state for > STUCK_JOB_TIMEOUT_MS
+    // For now, just log
+    console.log(`[WorkerPool] Watchdog check: ${this._running.filter(Boolean).length} active workers, ${this._jobQueue.length} queued`);
   }
 }
 

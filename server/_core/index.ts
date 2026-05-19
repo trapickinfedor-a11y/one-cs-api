@@ -236,26 +236,26 @@ async function startServer() {
     res.json(openapiSpec);
   });
 
-  // REST API
-  registerRestApi(app);
-
-  // Swagger UI must be registered BEFORE Vite/static so it takes precedence over the catch-all "*" handler
-  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec, {
-    swaggerOptions: {
-      persistAuthorization: true,
-      displayRequestDuration: true,
-    },
-  }));
-
-  // development mode uses Vite, production mode uses static files
+  // Vite must be registered BEFORE API routes so the catchall does not intercept /api/* paths
   if (process.env.NODE_ENV === "development") {
     await setupVite(app, server);
   } else {
     serveStatic(app);
   }
 
-  const preferredPort = parseInt(process.env.PORT || "3000");
+  // REST API
+  registerRestApi(app);
+
+  // Swagger UI
+  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec, {
+    swaggerOptions: {
+      persistAuthorization: true,
+      displayRequestDuration: true,
+    }
+  }));
+
   const isDevelopment = process.env.NODE_ENV === "development";
+  const preferredPort = parseInt(process.env.PORT || "3000");
   const port = isDevelopment ? await findAvailablePort(preferredPort) : preferredPort;
 
   if (isDevelopment && port !== preferredPort) {
